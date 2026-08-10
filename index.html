@@ -295,7 +295,13 @@ async function poll(containerId) {
 
       if (latest.status === 'done' && latest.out_id) {
         const v = document.getElementById('output-video');
-        v.src = '/api/download/' + latest.out_id;
+        // Only (re)load the video when the output actually changes.
+        // Reloading on every poll is what caused the preview to jump around
+        // between different finished videos while the page sat idle.
+        if (v.dataset.out !== latest.out_id) {
+          v.src = '/api/download/' + latest.out_id;
+          v.dataset.out = latest.out_id;
+        }
         v.classList.add('show');
         document.getElementById('output-placeholder').style.display = 'none';
       }

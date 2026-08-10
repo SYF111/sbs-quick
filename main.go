@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -154,6 +155,13 @@ func handleJobs(w http.ResponseWriter, r *http.Request) {
 	jobsMu.Lock(); defer jobsMu.Unlock()
 	list := make([]*Job, 0, len(jobs))
 	for _, j := range jobs { list = append(list, j) }
+	// Map iteration order is random in Go — sort by job ID (submission order)
+	// so the frontend can rely on list[len-1] being the latest job.
+	sort.Slice(list, func(i, k int) bool {
+		ii, _ := strconv.Atoi(list[i].ID)
+		kk, _ := strconv.Atoi(list[k].ID)
+		return ii < kk
+	})
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(list)
 }
@@ -243,15 +251,18 @@ func runSingle(job *Job, inPath string, shift int, compress float64, maxSize int
 	// Build ffmpeg filter for: scale → compress → shift → hstack → encode
 	var filters []string
 
-	// Scale if needed
+	// Scale if needed. Label the scaled output [s] so split can consume it.
+	// (Previously the scale output was unlabeled and split[l][r] failed to bind.)
+	inLabel := "[0:v]"
 	probeW, probeH := probeVideo(inPath)
 	if probeW > maxSize || probeH > maxSize {
 		scale := float64(maxSize) / float64(max(probeW, probeH))
-		filters = append(filters, fmt.Sprintf("scale=trunc(iw*%f/2)*2:trunc(ih*%f/2)*2", scale, scale))
+		filters = append(filters, fmt.Sprintf("[0:v]scale=trunc(iw*%f/2)*2:trunc(ih*%f/2)*2[s]", scale, scale))
+		inLabel = "[s]"
 	}
 
 	// Split
-	filters = append(filters, "split[l][r]")
+	filters = append(filters, inLabel+"split[l][r]")
 
 	// Left eye: compress horizontally, then shift right
 	filters = append(filters, buildCompressShift("l", "lc", compress, true, shift))
@@ -341,7 +352,8 @@ func buildCompressShift(srcLabel, dstLabel string, compress float64, shiftRight 
 	var chain []string
 	prefix := fmt.Sprintf("[%s]", srcLabel)
 	if compress > 0 {
-		prefix += fmt.Sprintf("scale=trunc(iw*(1-%f)/2)*2:ih,pad=iw:ih:(iw-ow)/2:0,", compress)
+		// Squeeze horizontally, keep even width
+		prefix += fmt.Sprintf("scale=trunc(iw*(1-%f)/2)*2:ih,", compress)
 	} else {
 		prefix += ""
 	}
@@ -374,7 +386,8 @@ func updateJob(id, status string, progress float64, msg, outID string) {
 }
 
 func probeVideo(path string) (int, int) {
-	cmd := exec.Command(ffmpeg_, "-i", path, "-f", "null", "-")
+	// ffmpeg -i only: prints metadata to stderr then exits (no full decode).
+	cmd := exec.Command(ffmpeg_, "-i", path)
 	out, _ := cmd.CombinedOutput()
 	w, h := 1920, 1080
 	for _, line := range strings.Split(string(out), "\n") {
@@ -399,7 +412,8 @@ func probeVideo(path string) (int, int) {
 }
 
 func probeDuration(path string) float64 {
-	cmd := exec.Command(ffmpeg_, "-i", path, "-f", "null", "-")
+	// ffmpeg -i only: metadata to stderr, exits immediately (no full decode).
+	cmd := exec.Command(ffmpeg_, "-i", path)
 	out, _ := cmd.CombinedOutput()
 	for _, line := range strings.Split(string(out), "\n") {
 		if strings.Contains(line, "Duration") {
