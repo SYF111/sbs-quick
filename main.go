@@ -70,9 +70,15 @@ func main() {
 	}
 }
 
+// findFFmpeg checks if ffmpeg is runnable. Returns "ffmpeg" (name, not full
+// path) so Windows can resolve winget aliases that exist in PATH but aren't
+// real executables.
 func findFFmpeg() string {
 	if p, err := exec.LookPath("ffmpeg"); err == nil {
-		return p
+		// Verify it actually runs (winget Links alias passes LookPath but may fail exec)
+		if err := exec.Command(p, "-version").Run(); err == nil {
+			return "ffmpeg"
+		}
 	}
 	home, _ := os.UserHomeDir()
 	dirs := []string{}
