@@ -375,34 +375,23 @@ func updateJob(id, status string, progress float64, msg, outID string) {
 
 func probeVideo(path string) (int, int) {
 	cmd := exec.Command(ffmpeg_, "-i", path, "-f", "null", "-")
-	// ffmpeg prints stream info to stderr
 	out, _ := cmd.CombinedOutput()
 	w, h := 1920, 1080
 	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.Contains(line, "Stream") && strings.Contains(line, "Video") {
-			// Parse "1280x720" or similar
-			idx := strings.Index(line, ",")
-			if idx < 0 { continue }
-			dims := strings.Split(strings.TrimSpace(line[:idx]), " ")
-			last := dims[len(dims)-1]
-			parts := strings.Split(last, "x")
-			if len(parts) == 2 {
-				w, _ = strconv.Atoi(strings.TrimSpace(parts[0]))
-				h, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
-			}
-			break
+		if !strings.Contains(line, "Stream") || !strings.Contains(line, "Video") {
+			continue
 		}
-		// Alternate: "Video: h264 ... 1280x720"
+		// Find the resolution: a word containing exactly one 'x' where both sides
+		// are integers. Trim trailing punctuation (commas, parens).
 		for _, word := range strings.Fields(line) {
-			if strings.Count(word, "x") == 1 {
-				parts := strings.Split(word, "x")
-				ww, err1 := strconv.Atoi(parts[0])
-				hh, err2 := strconv.Atoi(parts[1])
-				if err1 == nil && err2 == nil && ww > 0 && hh > 0 {
-					w, h = ww, hh
-					break
-				}
+			word = strings.TrimRight(word, ",)]")
+			parts := strings.SplitN(word, "x", 2)
+			if len(parts) != 2 { continue }
+			ww, e1 := strconv.Atoi(parts[0])
+			hh, e2 := strconv.Atoi(parts[1])
+			if e1 == nil && e2 == nil && ww >= 16 && hh >= 16 {
+				w, h = ww, hh
+				return w, h
 			}
 		}
 	}
