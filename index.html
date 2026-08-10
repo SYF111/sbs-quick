@@ -88,18 +88,19 @@ select { background: #111827; color: var(--text); border: 1px solid var(--border
         <input type="range" id="shift" min="2" max="20" value="6" step="1" oninput="document.getElementById('shift-val').textContent=this.value;updateEstimate()">
       </div>
 
-      <label style="margin-top:12px">横向压窄 <span id="compress-val">25%</span></label>
+      <label style="margin-top:12px">横向压窄 <span id="compress-val">0%</span></label>
       <div class="slider-row">
-        <input type="range" id="compress" min="0" max="40" value="25" step="5" oninput="document.getElementById('compress-val').textContent=this.value+'%';updateEstimate()">
+        <input type="range" id="compress" min="0" max="40" value="0" step="5" oninput="document.getElementById('compress-val').textContent=this.value+'%';updateEstimate()">
       </div>
 
-      <label style="margin-top:12px">分辨率（最长边）</label>
+      <label style="margin-top:12px">分辨率（最长边，0=原始）</label>
       <select id="max-size" onchange="updateEstimate()">
+        <option value="0" selected>原始分辨率（不缩放）</option>
         <option value="480">480</option>
         <option value="640">640</option>
         <option value="720">720</option>
         <option value="960">960</option>
-        <option value="1280" selected>1280</option>
+        <option value="1280">1280</option>
         <option value="1920">1920</option>
       </select>
 
@@ -130,15 +131,16 @@ select { background: #111827; color: var(--text); border: 1px solid var(--border
         <input type="range" id="b-shift" min="2" max="20" value="6" step="1" oninput="document.getElementById('b-shift-val').textContent=this.value">
       </div>
 
-      <label style="margin-top:12px">横向压窄 <span id="b-compress-val">25%</span></label>
+      <label style="margin-top:12px">横向压窄 <span id="b-compress-val">0%</span></label>
       <div class="slider-row">
-        <input type="range" id="b-compress" min="0" max="40" value="25" step="5" oninput="document.getElementById('b-compress-val').textContent=this.value+'%'">
+        <input type="range" id="b-compress" min="0" max="40" value="0" step="5" oninput="document.getElementById('b-compress-val').textContent=this.value+'%'">
       </div>
 
       <label style="margin-top:12px">分辨率</label>
       <select id="b-max-size">
+        <option value="0" selected>原始分辨率（不缩放）</option>
         <option value="480">480</option><option value="640">640</option><option value="720">720</option>
-        <option value="960">960</option><option value="1280" selected>1280</option><option value="1920">1920</option>
+        <option value="960">960</option><option value="1280">1280</option><option value="1920">1920</option>
       </select>
 
       <button class="btn btn-go" id="btn-batch" onclick="submitBatch()" disabled>批量处理</button>
@@ -218,7 +220,8 @@ function updateEstimate() {
   const size = selectedFile.size;
   const dur = size / (5*1024*1024) * 60; // rough: ~5MB/min for 720p
   const maxSize = parseInt(document.getElementById('max-size').value);
-  const factor = maxSize > 1280 ? 1.5 : maxSize < 720 ? 0.5 : 1.0;
+  // 0 = keep original resolution (usually slower since no downscale)
+  const factor = maxSize === 0 ? 2.0 : maxSize > 1280 ? 1.5 : maxSize < 720 ? 0.5 : 1.0;
   const secs = Math.max(3, dur * factor * 0.3); // quick mode: 30% of duration
   const m = Math.floor(secs/60);
   const s = Math.round(secs%60);

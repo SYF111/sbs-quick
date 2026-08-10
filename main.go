@@ -223,7 +223,8 @@ func handleSingle(w http.ResponseWriter, r *http.Request) {
 	compress, _ := strconv.ParseFloat(r.FormValue("compress"), 64)
 	if compress < 0 { compress = 0 }
 	maxSize, _ := strconv.Atoi(r.FormValue("max_size"))
-	if maxSize < 1 { maxSize = 1280 }
+	// 0 = keep original resolution (no scaling)
+	if maxSize < 0 { maxSize = 0 }
 	batch := r.FormValue("batch") == "1"
 
 	filename := header.Filename
@@ -266,9 +267,10 @@ func runSingle(job *Job, inPath string, shift int, compress float64, maxSize int
 
 	// Scale if needed. Label the scaled output [s] so split can consume it.
 	// (Previously the scale output was unlabeled and split[l][r] failed to bind.)
+	// maxSize <= 0 means keep the original resolution — no scaling at all.
 	inLabel := "[0:v]"
 	probeW, probeH := probeVideo(inPath)
-	if probeW > maxSize || probeH > maxSize {
+	if maxSize > 0 && (probeW > maxSize || probeH > maxSize) {
 		scale := float64(maxSize) / float64(max(probeW, probeH))
 		filters = append(filters, fmt.Sprintf("[0:v]scale=trunc(iw*%f/2)*2:trunc(ih*%f/2)*2[s]", scale, scale))
 		inLabel = "[s]"
@@ -300,7 +302,9 @@ func runSingle(job *Job, inPath string, shift int, compress float64, maxSize int
 		"-y", "-i", inPath,
 		"-filter_complex", filterSpec,
 		"-map", "[out]", "-map", "0:a?",
-		"-c:v", "libx264", "-crf", "18", "-preset", "fast",
+		// Lossless encode: CRF 0 keeps the source quality exactly
+		// (source resolution is preserved unless max_size is set).
+		"-c:v", "libx264", "-crf", "0", "-preset", "fast",
 		"-pix_fmt", "yuv420p", "-c:a", "aac",
 		"-movflags", "+faststart",
 		"-progress", "pipe:1", "-nostats",
