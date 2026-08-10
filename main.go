@@ -187,7 +187,15 @@ func handleSingle(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing video file", 400)
 		return
 	}
-	defer file.Close()
+
+	// Read file into memory BEFORE the handler returns (multipart reader is
+	// closed when the handler exits, so the goroutine can't read it later).
+	filedata, err := io.ReadAll(file)
+	file.Close()
+	if err != nil {
+		http.Error(w, "failed to read upload: "+err.Error(), 400)
+		return
+	}
 
 	shift, _ := strconv.Atoi(r.FormValue("shift"))
 	if shift < 1 { shift = 6 }
@@ -202,12 +210,12 @@ func handleSingle(w http.ResponseWriter, r *http.Request) {
 	job := newJob(filename)
 
 	go func() {
-		// Save uploaded file (keep temp dir — output is served from here)
 		tmpDir, _ := os.MkdirTemp("", "sbs_quick_")
 		inPath := filepath.Join(tmpDir, filename)
-		f, _ := os.Create(inPath)
-		io.Copy(f, file)
-		f.Close()
+		if err := os.WriteFile(inPath, filedata, 0644); err != nil {
+			updateJob(job.ID, "error", 0, err.Error(), "")
+			return
+		}
 
 		if batch {
 			// For batch: just queue this one; caller manages batch orchestration
@@ -246,9 +254,9 @@ func runSingle(job *Job, inPath string, shift int, compress float64, maxSize int
 	filters = append(filters, "split[l][r]")
 
 	// Left eye: compress horizontally, then shift right
-	filters = append(filters, buildCompressShift("l", "lc", compress, shift))
+	filters = append(filters, buildCompressShift("l", "lc", compress, true, shift))
 	// Right eye: compress horizontally, then shift left
-	filters = append(filters, buildCompressShift("r", "rc", compress, -shift))
+	filters = append(filters, buildCompressShift("r", "rc", compress, false, shift))
 
 	// hstack
 	filters = append(filters, "[lc][rc]hstack[out]")
@@ -329,26 +337,23 @@ func runSingle(job *Job, inPath string, shift int, compress float64, maxSize int
 	log.Printf("[%s] DONE: %s (%.1fs)", job.ID, outPath, elapsed)
 }
 
-func buildCompressShift(srcLabel, dstLabel string, compress float64, shiftPx int) string {
+func buildCompressShift(srcLabel, dstLabel string, compress float64, shiftRight bool, shiftPx int) string {
+	var chain []string
+	prefix := fmt.Sprintf("[%s]", srcLabel)
 	if compress > 0 {
-		// Scale narrower, then pad back to original width (centered)
-		return fmt.Sprintf(
-			"[%s]scale=trunc(iw*(1-%f)/2)*2:ih,pad=iw:ih:(iw-ow)/2:0,"+
-				"crop=iw-%d:ih:%d:0,pad=iw:ih:%d:0[%s]",
-			srcLabel, compress,
-			abs(shiftPx), max(shiftPx, 0), max(shiftPx, 0),
-			dstLabel,
-		)
+		prefix += fmt.Sprintf("scale=trunc(iw*(1-%f)/2)*2:ih,pad=iw:ih:(iw-ow)/2:0,", compress)
 	} else {
-		if shiftPx >= 0 {
-			return fmt.Sprintf("[%s]crop=iw-%d:ih:%d:0,pad=iw:ih:%d:0[%s]",
-				srcLabel, shiftPx, shiftPx, shiftPx, dstLabel)
-		} else {
-			s := -shiftPx
-			return fmt.Sprintf("[%s]crop=iw-%d:ih:0:0,pad=iw:ih:%d:0[%s]",
-				srcLabel, s, s, dstLabel)
-		}
+		prefix += ""
 	}
+	if shiftRight {
+		// Shift RIGHT: take left (W-N) pixels, pad left side by N (output = original W)
+		// After crop, iw=W-N; pad target = iw+N = original W
+		chain = append(chain, fmt.Sprintf("%scrop=iw-%d:ih:0:0,pad=iw+%d:ih:%d:0", prefix, shiftPx, shiftPx, shiftPx))
+	} else {
+		// Shift LEFT: take right (W-N) pixels, pad right side by N
+		chain = append(chain, fmt.Sprintf("%scrop=iw-%d:ih:%d:0,pad=iw+%d:ih:0:0", prefix, shiftPx, shiftPx, shiftPx))
+	}
+	return strings.Join(chain, ",") + fmt.Sprintf("[%s]", dstLabel)
 }
 
 // ── Helpers ────────────────────────────────────────────────

@@ -239,6 +239,10 @@ async function submitSingle() {
 
   try {
     const r = await fetch('/api/single', { method:'POST', body:form });
+    if (!r.ok) {
+      const text = await r.text();
+      throw new Error(`HTTP ${r.status}: ${text.substring(0, 200)}`);
+    }
     const job = await r.json();
     startPolling('single-jobs');
   } catch(e) {
