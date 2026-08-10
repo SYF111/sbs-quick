@@ -104,6 +104,13 @@ select { background: #111827; color: var(--text); border: 1px solid var(--border
         <option value="1920">1920</option>
       </select>
 
+      <label style="margin-top:12px">编码器</label>
+      <select id="encoder">
+        <option value="auto" selected>自动（有 AMD 显卡用硬件加速，否则 CPU 无损）</option>
+        <option value="amd">AMD 硬件加速（最快）</option>
+        <option value="cpu">CPU 无损（画质最佳）</option>
+      </select>
+
       <div class="estimate" id="estimate">⏱ 选择视频后自动预估</div>
 
       <button class="btn btn-go" id="btn-single" onclick="submitSingle()" disabled>开始处理</button>
@@ -141,6 +148,13 @@ select { background: #111827; color: var(--text); border: 1px solid var(--border
         <option value="0" selected>原始分辨率（不缩放）</option>
         <option value="480">480</option><option value="640">640</option><option value="720">720</option>
         <option value="960">960</option><option value="1280">1280</option><option value="1920">1920</option>
+      </select>
+
+      <label style="margin-top:12px">编码器</label>
+      <select id="b-encoder">
+        <option value="auto" selected>自动（有 AMD 显卡用硬件加速，否则 CPU 无损）</option>
+        <option value="amd">AMD 硬件加速（最快）</option>
+        <option value="cpu">CPU 无损（画质最佳）</option>
       </select>
 
       <button class="btn btn-go" id="btn-batch" onclick="submitBatch()" disabled>批量处理</button>
@@ -239,6 +253,7 @@ async function submitSingle() {
   form.append('shift', document.getElementById('shift').value);
   form.append('compress', document.getElementById('compress').value / 100);
   form.append('max_size', document.getElementById('max-size').value);
+  form.append('encoder', document.getElementById('encoder').value);
 
   try {
     const r = await fetch('/api/single', { method:'POST', body:form });
@@ -264,6 +279,7 @@ async function submitBatch() {
   const shift = document.getElementById('b-shift').value;
   const compress = document.getElementById('b-compress').value / 100;
   const maxSize = document.getElementById('b-max-size').value;
+  const encoder = document.getElementById('b-encoder').value;
 
   for (const file of batchFiles) {
     const form = new FormData();
@@ -271,6 +287,7 @@ async function submitBatch() {
     form.append('shift', shift);
     form.append('compress', compress);
     form.append('max_size', maxSize);
+    form.append('encoder', encoder);
     form.append('batch', '1');
     try {
       await fetch('/api/single', { method:'POST', body:form });

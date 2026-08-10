@@ -41,6 +41,7 @@ var (
 	ffmpeg_ string
 	outputs = map[string]string{} // outID → file path
 	outsMu  sync.Mutex
+	amfOK   = -1 // -1 unknown, 0 no, 1 yes
 )
 
 func main() {
@@ -161,6 +162,7 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]any{
 		"ffmpeg": ffmpeg_ != "", "os": runtime.GOOS, "arch": runtime.GOARCH,
+		"amd": amfAvailable(),
 	})
 }
 
@@ -226,6 +228,8 @@ func handleSingle(w http.ResponseWriter, r *http.Request) {
 	// 0 = keep original resolution (no scaling)
 	if maxSize < 0 { maxSize = 0 }
 	batch := r.FormValue("batch") == "1"
+	encoder := r.FormValue("encoder")
+	if encoder != "amd" && encoder != "cpu" { encoder = "auto" }
 
 	filename := header.Filename
 	if filename == "" { filename = "video.mp4" }
@@ -241,9 +245,9 @@ func handleSingle(w http.ResponseWriter, r *http.Request) {
 
 		if batch {
 			// For batch: just queue this one; caller manages batch orchestration
-			runSingle(job, inPath, shift, compress, maxSize)
+			runSingle(job, inPath, shift, compress, maxSize, encoder)
 		} else {
-			runSingle(job, inPath, shift, compress, maxSize)
+			runSingle(job, inPath, shift, compress, maxSize, encoder)
 		}
 	}()
 
@@ -253,7 +257,7 @@ func handleSingle(w http.ResponseWriter, r *http.Request) {
 
 // ── Core processing ────────────────────────────────────────
 
-func runSingle(job *Job, inPath string, shift int, compress float64, maxSize int) {
+func runSingle(job *Job, inPath string, shift int, compress float64, maxSize int, encoder string) {
 	start := time.Now()
 	updateJob(job.ID, "running", 0, "准备中...", "")
 
@@ -298,26 +302,61 @@ func runSingle(job *Job, inPath string, shift int, compress float64, maxSize int
 
 	updateJob(job.ID, "running", 0.05, "编码中...", "")
 
-	cmd := exec.Command(ffmpeg_,
+	// Choose encoder: amd = AMD GPU hardware (h264_amf), cpu = lossless x264.
+	// "auto" picks AMD if the driver exposes h264_amf, else falls back to CPU.
+	encArgs, encName := buildEncodeArgs(encoder)
+	updateJob(job.ID, "running", 0.05, "编码中 ("+encName+")...", "")
+
+	err := runFFmpeg(job, inPath, outPath, filterSpec, encArgs)
+	// If the hardware encoder failed (driver issue, unsupported format...),
+	// fall back to CPU lossless so the job still completes.
+	if err != nil && encName == "AMD硬件加速" {
+		log.Printf("[%s] AMD encode failed, retrying with CPU lossless: %v", job.ID, err)
+		encArgs, encName = cpuEncodeArgs()
+		updateJob(job.ID, "running", 0.05, "AMD 编码失败，改用 CPU 无损重试...", "")
+		err = runFFmpeg(job, inPath, outPath, filterSpec, encArgs)
+	}
+	elapsed := time.Since(start).Seconds()
+
+	if err != nil {
+		updateJob(job.ID, "error", 0, err.Error(), "")
+		log.Printf("[%s] FAIL: %v (%.1fs)", job.ID, err, elapsed)
+		return
+	}
+
+	// Register output for download
+	outID := fmt.Sprintf("%s_%d", job.ID, time.Now().UnixNano())
+	outsMu.Lock()
+	outputs[outID] = outPath
+	outsMu.Unlock()
+
+	updateJob(job.ID, "done", 1.0, fmt.Sprintf("完成 (%.0f秒, %s)", elapsed, encName), outID)
+	log.Printf("[%s] DONE: %s (%.1fs, %s)", job.ID, outPath, elapsed, encName)
+}
+
+// runFFmpeg executes the encode command, streams progress updates to the job,
+// and returns a descriptive error (with the last stderr lines) on failure.
+func runFFmpeg(job *Job, inPath, outPath, filterSpec string, encArgs []string) error {
+	args := []string{
 		"-y", "-i", inPath,
 		"-filter_complex", filterSpec,
 		"-map", "[out]", "-map", "0:a?",
-		// Lossless encode: CRF 0 keeps the source quality exactly
-		// (source resolution is preserved unless max_size is set).
-		"-c:v", "libx264", "-crf", "0", "-preset", "fast",
+	}
+	args = append(args, encArgs...)
+	args = append(args,
 		"-pix_fmt", "yuv420p", "-c:a", "aac",
 		"-movflags", "+faststart",
 		"-progress", "pipe:1", "-nostats",
 		outPath,
 	)
+	cmd := exec.Command(ffmpeg_, args...)
 
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 	stderrB := new(strings.Builder)
 
 	if err := cmd.Start(); err != nil {
-		updateJob(job.ID, "error", 0, err.Error(), "")
-		return
+		return err
 	}
 	go func() { io.Copy(stderrB, stderr) }()
 
@@ -343,26 +382,51 @@ func runSingle(job *Job, inPath string, shift int, compress float64, maxSize int
 	}()
 
 	err := cmd.Wait()
-	elapsed := time.Since(start).Seconds()
-
 	if err != nil {
 		msg := err.Error()
 		if s := stderrB.String(); s != "" {
 			msg += "\n" + lastLines(s, 3)
 		}
-		updateJob(job.ID, "error", 0, msg, "")
-		log.Printf("[%s] FAIL: %v (%.1fs)", job.ID, err, elapsed)
-		return
+		return fmt.Errorf("%s", msg)
 	}
+	return nil
+}
 
-	// Register output for download
-	outID := fmt.Sprintf("%s_%d", job.ID, time.Now().UnixNano())
-	outsMu.Lock()
-	outputs[outID] = outPath
-	outsMu.Unlock()
+// buildEncodeArgs picks the video encoder based on the user's choice:
+// "amd" → AMD GPU (h264_amf, fast), "cpu" → lossless x264, "auto" → AMD if available.
+func buildEncodeArgs(encoder string) ([]string, string) {
+	if encoder == "amd" || (encoder == "auto" && amfAvailable()) {
+		return amdEncodeArgs()
+	}
+	return cpuEncodeArgs()
+}
 
-	updateJob(job.ID, "done", 1.0, fmt.Sprintf("完成 (%.0f秒)", elapsed), outID)
-	log.Printf("[%s] DONE: %s (%.1fs)", job.ID, outPath, elapsed)
+func cpuEncodeArgs() ([]string, string) {
+	// Lossless: CRF 0 keeps the source quality exactly.
+	return []string{"-c:v", "libx264", "-crf", "0", "-preset", "fast"}, "CPU无损"
+}
+
+func amdEncodeArgs() ([]string, string) {
+	// AMD hardware encoder. Quality mode with low QP ≈ visually lossless,
+	// several times faster than software x264.
+	return []string{
+		"-c:v", "h264_amf",
+		"-usage", "transcoding",
+		"-quality", "quality",
+		"-rc", "0", // CQP constant quality
+		"-qp_i", "14", "-qp_p", "16", "-qp_b", "16",
+	}, "AMD硬件加速"
+}
+
+// amfAvailable checks whether ffmpeg has the h264_amf encoder (cached).
+func amfAvailable() bool {
+	if amfOK != -1 { return amfOK == 1 }
+	amfOK = 0
+	out, err := exec.Command(ffmpeg_, "-hide_banner", "-encoders").CombinedOutput()
+	if err == nil && strings.Contains(string(out), "h264_amf") {
+		amfOK = 1
+	}
+	return amfOK == 1
 }
 
 func buildCompressShift(srcLabel, dstLabel string, compress float64, shiftRight bool, shiftPx int) string {
