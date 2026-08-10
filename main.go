@@ -7,6 +7,7 @@ import (
 	"html/template"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -64,6 +65,24 @@ func main() {
 	}
 	log.Println("Press Ctrl+C to stop.")
 	openBrowser(url)
+
+	// Try ports 7878..7887, skip ones already in use
+	basePort, _ := strconv.Atoi(port)
+	for i := 0; i < 10; i++ {
+		p := fmt.Sprintf(":%d", basePort+i)
+		ln, err := net.Listen("tcp", "127.0.0.1"+p)
+		if err == nil {
+			ln.Close()
+			port = fmt.Sprintf("%d", basePort+i)
+			break
+		}
+	}
+	url = fmt.Sprintf("http://127.0.0.1:%s", port)
+	log.Printf("Listening on %s", url)
+	// Open browser to the actual port (might differ from original if conflict)
+	if port != fmt.Sprintf("%d", basePort) {
+		openBrowser(url)
+	}
 
 	if err := http.ListenAndServe("127.0.0.1:"+port, mux); err != nil {
 		log.Fatal(err)
