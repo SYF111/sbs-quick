@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SBS Quick — 快速3D转换</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #111; color: #eee; min-height: 100vh; }
+header { background: #222; padding: 16px 24px; border-bottom: 1px solid #333; display: flex; align-items: center; gap: 12px; }
+header h1 { font-size: 18px; font-weight: 600; }
+.badge { font-size: 11px; background: #0a0; color: #000; padding: 2px 8px; border-radius: 10px; font-weight: 700; }
+.tabs { display: flex; gap: 0; margin: 0 24px; }
+.tab { padding: 12px 24px; cursor: pointer; border: none; background: none; color: #888; font-size: 14px; border-bottom: 2px solid transparent; transition: all .2s; }
+.tab.active { color: #fff; border-bottom-color: #0a0; }
+main { max-width: 700px; margin: 24px auto; padding: 0 24px; }
+.card { background: #1a1a1a; border: 1px solid #333; border-radius: 8px; padding: 20px; margin-bottom: 16px; }
+label { display: block; margin-bottom: 6px; font-size: 13px; color: #aaa; }
+input[type="text"], input[type="number"] { width: 100%; padding: 10px 12px; background: #222; border: 1px solid #444; border-radius: 6px; color: #fff; font-size: 14px; margin-bottom: 14px; }
+input:focus { outline: none; border-color: #0a0; }
+.btn { padding: 10px 28px; border: none; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; transition: all .2s; }
+.btn-go { background: #0a0; color: #000; }
+.btn-go:hover { background: #0c0; }
+.btn-go:disabled { background: #333; color: #666; cursor: not-allowed; }
+.status { font-size: 13px; color: #888; margin-top: 8px; }
+.error { color: #f44; }
+.success { color: #0a0; }
+.job-list { margin-top: 12px; }
+.job { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid #222; font-size: 13px; }
+.job .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.progress-bar { width: 100%; height: 4px; background: #333; border-radius: 2px; margin-top: 4px; }
+.progress-fill { height: 100%; background: #0a0; border-radius: 2px; transition: width .3s; }
+.help { font-size: 12px; color: #666; margin-top: 8px; line-height: 1.6; }
+.back-link { color: #0a0; text-decoration: none; }
+.back-link:hover { text-decoration: underline; }
+.batch-status { font-size: 13px; color: #888; margin-top: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>SBS Quick</h1>
+  <span class="badge">3D</span>
+</header>
+
+<div class="tabs">
+  <button class="tab active" onclick="switchTab('single')">单个视频</button>
+  <button class="tab" onclick="switchTab('batch')">批量处理</button>
+</div>
+
+<!-- Single -->
+<main id="tab-single">
+  <div class="card">
+    <label>视频路径</label>
+    <input type="text" id="single-path" placeholder="C:\Videos\myvideo.mp4 或拖拽文件到此处">
+    <label>平移像素 (2–20)</label>
+    <input type="number" id="single-shift" value="6" min="2" max="20">
+    <button class="btn btn-go" id="btn-single" onclick="submitSingle()">开始转换</button>
+    <div class="status" id="single-status"></div>
+    <div id="single-jobs" class="job-list"></div>
+  </div>
+</main>
+
+<!-- Batch -->
+<main id="tab-batch" style="display:none;">
+  <div class="card">
+    <label>文件夹路径</label>
+    <input type="text" id="batch-dir" placeholder="C:\Videos\">
+    <label>平移像素 (2–20)</label>
+    <input type="number" id="batch-shift" value="6" min="2" max="20">
+    <button class="btn btn-go" id="btn-batch" onclick="submitBatch()">批量转换</button>
+    <div class="status" id="batch-status"></div>
+    <div id="batch-jobs" class="job-list"></div>
+  </div>
+</main>
+
+<script>
+let currentTab = 'single';
+let pollTimer = null;
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', (i===0 && tab==='single') || (i===1 && tab==='batch')));
+  document.getElementById('tab-single').style.display = tab==='single' ? 'block' : 'none';
+  document.getElementById('tab-batch').style.display = tab==='batch' ? 'block' : 'none';
+}
+
+async function submitSingle() {
+  const path = document.getElementById('single-path').value.trim();
+  const shift = parseInt(document.getElementById('single-shift').value) || 6;
+  if (!path) { document.getElementById('single-status').innerHTML = '<span class="error">请输入视频路径</span>'; return; }
+  document.getElementById('single-status').textContent = '提交中...';
+  document.getElementById('btn-single').disabled = true;
+  try {
+    const r = await fetch('/api/single', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path, shift}) });
+    const job = await r.json();
+    document.getElementById('single-status').textContent = '已开始 — ' + job.filename;
+    startPolling('single-jobs', 'single-status');
+  } catch(e) {
+    document.getElementById('single-status').innerHTML = '<span class="error">请求失败: ' + e.message + '</span>';
+    document.getElementById('btn-single').disabled = false;
+  }
+}
+
+async function submitBatch() {
+  const dir = document.getElementById('batch-dir').value.trim();
+  const shift = parseInt(document.getElementById('batch-shift').value) || 6;
+  if (!dir) { document.getElementById('batch-status').innerHTML = '<span class="error">请输入文件夹路径</span>'; return; }
+  document.getElementById('batch-status').textContent = '扫描中...';
+  document.getElementById('btn-batch').disabled = true;
+  try {
+    const r = await fetch('/api/batch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({dir, shift}) });
+    await r.json();
+    document.getElementById('batch-status').textContent = '批量处理已开始';
+    startPolling('batch-jobs', 'batch-status');
+  } catch(e) {
+    document.getElementById('batch-status').innerHTML = '<span class="error">请求失败: ' + e.message + '</span>';
+    document.getElementById('btn-batch').disabled = false;
+  }
+}
+
+function startPolling(listId, statusId) {
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(() => poll(listId, statusId), 1500);
+}
+
+async function poll(listId, statusId) {
+  try {
+    const r = await fetch('/api/jobs');
+    const jobs = await r.json();
+    if (!jobs || jobs.length === 0) return;
+    const el = document.getElementById(listId);
+    el.innerHTML = jobs.map(j => {
+      let cls = j.status==='error' ? 'error' : j.status==='done' ? 'success' : '';
+      let extra = '';
+      if (j.status === 'running') {
+        extra = `<div class="progress-bar"><div class="progress-fill" style="width:${(j.progress*100).toFixed(0)}%"></div></div>`;
+      }
+      if (j.out_path) extra += `<br><span class="success">输出: ${j.out_path}</span>`;
+      if (j.error) extra += `<br><span class="error">${j.error}</span>`;
+      return `<div class="job"><span class="name">${j.filename}</span> <span class="${cls}">${j.status} ${j.status==='running'?Math.round(j.progress*100)+'%':''}</span>${extra}</div>`;
+    }).join('');
+    const allDone = jobs.every(j => j.status === 'done' || j.status === 'error');
+    if (allDone) {
+      clearInterval(pollTimer);
+      document.getElementById(statusId).textContent = '全部完成';
+      document.getElementById('btn-single').disabled = false;
+      document.getElementById('btn-batch').disabled = false;
+    }
+  } catch(e) {
+    clearInterval(pollTimer);
+  }
+}
+
+// Allow drag-and-drop file paths (Windows)
+['single-path','batch-dir'].forEach(id => {
+  const el = document.getElementById(id);
+  el.addEventListener('dragover', e => { e.preventDefault(); });
+  el.addEventListener('drop', e => {
+    e.preventDefault();
+    const files = e.dataTransfer.files;
+    if (files.length > 0) {
+      el.value = files[0].path || files[0].name;
+    }
+  });
+});
+</script>
+</body>
+</html>
