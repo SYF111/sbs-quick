@@ -81,19 +81,29 @@ func main() {
 }
 
 func findFFmpeg() string {
-	if _, err := exec.LookPath("ffmpeg"); err == nil {
-		if err := exec.Command("ffmpeg", "-version").Run(); err == nil {
-			return "ffmpeg"
-		}
+	// 1. PATH
+	if p, err := exec.LookPath("ffmpeg"); err == nil {
+		if exec.Command(p, "-version").Run() == nil { return p }
 	}
+
 	home, _ := os.UserHomeDir()
-	dirs := []string{"/usr/local/bin", "/opt/homebrew/bin"}
+
+	// Candidate dirs where ffmpeg.exe commonly lives
+	var dirs []string
 	if runtime.GOOS == "windows" {
+		localAppData := os.Getenv("LOCALAPPDATA")
 		dirs = []string{
 			filepath.Join(os.Getenv("ProgramFiles"), "ffmpeg", "bin"),
 			`C:\ffmpeg\bin`,
 			`C:\Program Files\ffmpeg\bin`,
+			// winget shims (winget install Gyan.FFmpeg creates these)
+			filepath.Join(localAppData, `Microsoft\WinGet\Links`),
+			filepath.Join(home, `scoop\apps\ffmpeg\current\bin`),
+			filepath.Join(home, `scoop\shims`),
+			`C:\ProgramData\chocolatey\bin`,
 		}
+	} else {
+		dirs = []string{"/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"}
 	}
 	for _, d := range dirs {
 		p := filepath.Join(d, "ffmpeg"+ext())
@@ -101,15 +111,18 @@ func findFFmpeg() string {
 			if exec.Command(p, "-version").Run() == nil { return p }
 		}
 	}
-	// Winget deep search
+
+	// 2. Deep search inside winget package dirs (path can be very deep, so no
+	// depth cutoff — the old depth>5 skip missed real installs).
 	if runtime.GOOS == "windows" {
 		root := filepath.Join(home, `AppData\Local\Microsoft\WinGet\Packages`)
 		filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
 			if err != nil { return filepath.SkipDir }
-			if d.IsDir() && depth(p) > 5 { return filepath.SkipDir }
+			if d.IsDir() { return nil }
 			if strings.EqualFold(d.Name(), "ffmpeg.exe") {
 				if exec.Command(p, "-version").Run() == nil {
 					dirs = append(dirs, filepath.Dir(p))
+					return filepath.SkipAll
 				}
 			}
 			return nil
@@ -436,11 +449,6 @@ func parseTime(ts string) float64 {
 }
 
 func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
-
-func depth(p string) int {
-	home, _ := os.UserHomeDir()
-	return len(strings.Split(strings.TrimPrefix(p, home), string(os.PathSeparator)))
-}
 
 func lastLines(s string, n int) string {
 	lines := strings.Split(strings.TrimSpace(s), "\n")

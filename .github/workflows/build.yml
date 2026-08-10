@@ -8,22 +8,10 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            goos: linux
-            goarch: amd64
-            ext: ""
-          - os: ubuntu-latest
+          - os: windows-latest
             goos: windows
             goarch: amd64
             ext: ".exe"
-          - os: macos-latest
-            goos: darwin
-            goarch: amd64
-            ext: ""
-          - os: macos-latest
-            goos: darwin
-            goarch: arm64
-            ext: ""
 
     runs-on: ${{ matrix.os }}
     steps:
