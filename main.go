@@ -74,14 +74,33 @@ func findFFmpeg() string {
 	if p, err := exec.LookPath("ffmpeg"); err == nil {
 		return p
 	}
+	home, _ := os.UserHomeDir()
 	dirs := []string{}
 	switch runtime.GOOS {
 	case "windows":
-		dirs = []string{`C:\ffmpeg\bin`, `C:\Program Files\ffmpeg\bin`}
+		dirs = []string{
+			`C:\ffmpeg\bin`,
+			`C:\Program Files\ffmpeg\bin`,
+			filepath.Join(os.Getenv("ProgramFiles"), "ffmpeg", "bin"),
+			filepath.Join(home, `scoop\apps\ffmpeg\current\bin`),
+		}
+		// Winget installs to deep package dirs — quick walk to find ffmpeg.exe
+		wingetRoot := filepath.Join(home, `AppData\Local\Microsoft\WinGet\Packages`)
+		filepath.WalkDir(wingetRoot, func(p string, d os.DirEntry, err error) error {
+			if err != nil { return filepath.SkipDir }
+			if d.IsDir() {
+				if depth(p) > 5 { return filepath.SkipDir }
+				return nil
+			}
+			if strings.EqualFold(d.Name(), "ffmpeg.exe") {
+				dirs = append(dirs, filepath.Dir(p))
+			}
+			return nil
+		})
 	case "darwin":
-		dirs = []string{"/opt/homebrew/bin", "/usr/local/bin"}
+		dirs = []string{"/opt/homebrew/bin", "/usr/local/bin", filepath.Join(home, ".local/bin")}
 	default:
-		dirs = []string{"/usr/bin", "/usr/local/bin"}
+		dirs = []string{"/usr/bin", "/usr/local/bin", filepath.Join(home, ".local/bin")}
 	}
 	for _, d := range dirs {
 		p := filepath.Join(d, "ffmpeg"+ext())
@@ -301,6 +320,13 @@ func parseTime(ts string) float64 {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func depth(p string) int {
+	// relative to home dir
+	home, _ := os.UserHomeDir()
+	rel := strings.TrimPrefix(p, home)
+	return len(strings.Split(rel, string(os.PathSeparator)))
 }
 
 func lastLines(s string, n int) string {
