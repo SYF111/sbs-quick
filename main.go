@@ -74,9 +74,9 @@ func main() {
 // path) so Windows can resolve winget aliases that exist in PATH but aren't
 // real executables.
 func findFFmpeg() string {
-	if p, err := exec.LookPath("ffmpeg"); err == nil {
+	if _, err := exec.LookPath("ffmpeg"); err == nil {
 		// Verify it actually runs (winget Links alias passes LookPath but may fail exec)
-		if err := exec.Command(p, "-version").Run(); err == nil {
+		if err := exec.Command("ffmpeg", "-version").Run(); err == nil {
 			return "ffmpeg"
 		}
 	}
