@@ -27,8 +27,9 @@ type Job struct {
 	Filename string  `json:"filename"`
 	Status   string  `json:"status"`
 	Progress float64 `json:"progress"`
+	Msg      string  `json:"msg,omitempty"`
 	Error    string  `json:"error,omitempty"`
-	OutPath  string  `json:"out_path,omitempty"`
+	OutID    string  `json:"out_id,omitempty"`
 	Elapsed  float64 `json:"elapsed"`
 }
 
@@ -37,10 +38,9 @@ var (
 	jobsMu  sync.Mutex
 	jobSeq  int
 	ffmpeg_ string
+	outputs = map[string]string{} // outID → file path
+	outsMu  sync.Mutex
 )
-
-type SingleRequest struct{ Path string; Shift int }
-type BatchRequest  struct{ Dir  string; Shift int }
 
 func main() {
 	port := "7878"
@@ -53,83 +53,70 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", serveUI)
 	mux.HandleFunc("/api/single", handleSingle)
-	mux.HandleFunc("/api/batch", handleBatch)
 	mux.HandleFunc("/api/jobs", handleJobs)
 	mux.HandleFunc("/api/stats", handleStats)
+	mux.HandleFunc("/api/download/", handleDownload)
 
-	url := fmt.Sprintf("http://127.0.0.1:%s", port)
-	log.Printf("SBS Quick — %s", url)
-	log.Printf("ffmpeg: %s", ffmpeg_)
-	if ffmpeg_ == "" {
-		log.Println("WARNING: ffmpeg not found.")
-	}
-	log.Println("Press Ctrl+C to stop.")
-	openBrowser(url)
-
-	// Try ports 7878..7887, skip ones already in use
 	basePort, _ := strconv.Atoi(port)
 	for i := 0; i < 10; i++ {
-		p := fmt.Sprintf(":%d", basePort+i)
-		ln, err := net.Listen("tcp", "127.0.0.1"+p)
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", basePort+i))
 		if err == nil {
 			ln.Close()
 			port = fmt.Sprintf("%d", basePort+i)
 			break
 		}
 	}
-	url = fmt.Sprintf("http://127.0.0.1:%s", port)
-	log.Printf("Listening on %s", url)
-	// Open browser to the actual port (might differ from original if conflict)
-	if port != fmt.Sprintf("%d", basePort) {
-		openBrowser(url)
-	}
+
+	url := fmt.Sprintf("http://127.0.0.1:%s", port)
+	log.Printf("SBS Quick — %s", url)
+	log.Printf("ffmpeg: %s", ffmpeg_)
+	if ffmpeg_ == "" { log.Println("WARNING: ffmpeg not found") }
+	log.Println("Press Ctrl+C to stop (关闭此窗口退出)")
+	openBrowser(url)
 
 	if err := http.ListenAndServe("127.0.0.1:"+port, mux); err != nil {
 		log.Fatal(err)
 	}
 }
 
-// findFFmpeg checks if ffmpeg is runnable. Returns "ffmpeg" (name, not full
-// path) so Windows can resolve winget aliases that exist in PATH but aren't
-// real executables.
 func findFFmpeg() string {
 	if _, err := exec.LookPath("ffmpeg"); err == nil {
-		// Verify it actually runs (winget Links alias passes LookPath but may fail exec)
 		if err := exec.Command("ffmpeg", "-version").Run(); err == nil {
 			return "ffmpeg"
 		}
 	}
 	home, _ := os.UserHomeDir()
-	dirs := []string{}
-	switch runtime.GOOS {
-	case "windows":
+	dirs := []string{"/usr/local/bin", "/opt/homebrew/bin"}
+	if runtime.GOOS == "windows" {
 		dirs = []string{
+			filepath.Join(os.Getenv("ProgramFiles"), "ffmpeg", "bin"),
 			`C:\ffmpeg\bin`,
 			`C:\Program Files\ffmpeg\bin`,
-			filepath.Join(os.Getenv("ProgramFiles"), "ffmpeg", "bin"),
-			filepath.Join(home, `scoop\apps\ffmpeg\current\bin`),
 		}
-		// Winget installs to deep package dirs — quick walk to find ffmpeg.exe
-		wingetRoot := filepath.Join(home, `AppData\Local\Microsoft\WinGet\Packages`)
-		filepath.WalkDir(wingetRoot, func(p string, d os.DirEntry, err error) error {
-			if err != nil { return filepath.SkipDir }
-			if d.IsDir() {
-				if depth(p) > 5 { return filepath.SkipDir }
-				return nil
-			}
-			if strings.EqualFold(d.Name(), "ffmpeg.exe") {
-				dirs = append(dirs, filepath.Dir(p))
-			}
-			return nil
-		})
-	case "darwin":
-		dirs = []string{"/opt/homebrew/bin", "/usr/local/bin", filepath.Join(home, ".local/bin")}
-	default:
-		dirs = []string{"/usr/bin", "/usr/local/bin", filepath.Join(home, ".local/bin")}
 	}
 	for _, d := range dirs {
 		p := filepath.Join(d, "ffmpeg"+ext())
-		if _, err := os.Stat(p); err == nil { return p }
+		if _, err := os.Stat(p); err == nil {
+			if exec.Command(p, "-version").Run() == nil { return p }
+		}
+	}
+	// Winget deep search
+	if runtime.GOOS == "windows" {
+		root := filepath.Join(home, `AppData\Local\Microsoft\WinGet\Packages`)
+		filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if err != nil { return filepath.SkipDir }
+			if d.IsDir() && depth(p) > 5 { return filepath.SkipDir }
+			if strings.EqualFold(d.Name(), "ffmpeg.exe") {
+				if exec.Command(p, "-version").Run() == nil {
+					dirs = append(dirs, filepath.Dir(p))
+				}
+			}
+			return nil
+		})
+		for _, d := range dirs {
+			p := filepath.Join(d, "ffmpeg.exe")
+			if _, err := os.Stat(p); err == nil { return p }
+		}
 	}
 	return ""
 }
@@ -144,37 +131,23 @@ func openBrowser(url string) {
 	switch runtime.GOOS {
 	case "darwin": c = exec.Command("open", url)
 	case "windows": c = exec.Command("cmd", "/c", "start", url)
-	default:        c = exec.Command("xdg-open", url)
+	default: c = exec.Command("xdg-open", url)
 	}
 	c.Start()
 }
+
+// ── HTTP handlers ─────────────────────────────────────────
 
 func serveUI(w http.ResponseWriter, r *http.Request) {
 	tmpl, _ := template.ParseFS(webUI, "index.html")
 	tmpl.Execute(w, nil)
 }
 
-func handleSingle(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" { http.Error(w, "POST only", 405); return }
-	var req SingleRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, err.Error(), 400); return }
-	if req.Path == "" { http.Error(w, "missing path", 400); return }
-	if req.Shift < 1 { req.Shift = 6 }
-	job := newJob(filepath.Base(req.Path))
-	go runSingle(job, req.Path, req.Shift)
+func handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(job)
-}
-
-func handleBatch(w http.ResponseWriter, r *http.Request) {
-	if r.Method != "POST" { http.Error(w, "POST only", 405); return }
-	var req BatchRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { http.Error(w, err.Error(), 400); return }
-	if req.Dir == "" { http.Error(w, "missing dir", 400); return }
-	if req.Shift < 1 { req.Shift = 6 }
-	go runBatch(req.Dir, req.Shift)
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "started"})
+	json.NewEncoder(w).Encode(map[string]any{
+		"ffmpeg": ffmpeg_ != "", "os": runtime.GOOS, "arch": runtime.GOARCH,
+	})
 }
 
 func handleJobs(w http.ResponseWriter, r *http.Request) {
@@ -185,86 +158,135 @@ func handleJobs(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(list)
 }
 
-func handleStats(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"ffmpeg": ffmpeg_ != "", "os": runtime.GOOS, "arch": runtime.GOARCH,
-	})
-}
-
-func newJob(filename string) *Job {
-	jobsMu.Lock(); defer jobsMu.Unlock()
-	jobSeq++
-	j := &Job{ID: strconv.Itoa(jobSeq), Filename: filename, Status: "queued"}
-	jobs[j.ID] = j
-	return j
-}
-
-func updateJob(id, status string, progress float64, errMsg, outPath string) {
-	jobsMu.Lock(); defer jobsMu.Unlock()
-	if j, ok := jobs[id]; ok {
-		j.Status = status; j.Progress = progress; j.Error = errMsg; j.OutPath = outPath
+func handleDownload(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/download/")
+	outsMu.Lock()
+	path, ok := outputs[id]
+	outsMu.Unlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
 	}
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, filepath.Base(path)))
+	w.Header().Set("Content-Type", "video/mp4")
+	http.ServeFile(w, r, path)
 }
 
-func runSingle(job *Job, inPath string, shift int) {
+// ── Single file processing (multipart upload) ──────────────
+
+func handleSingle(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" { http.Error(w, "POST only", 405); return }
+
+	if err := r.ParseMultipartForm(2 << 30); err != nil { // 2GB max
+		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	file, header, err := r.FormFile("video")
+	if err != nil {
+		http.Error(w, "missing video file", 400)
+		return
+	}
+	defer file.Close()
+
+	shift, _ := strconv.Atoi(r.FormValue("shift"))
+	if shift < 1 { shift = 6 }
+	compress, _ := strconv.ParseFloat(r.FormValue("compress"), 64)
+	if compress < 0 { compress = 0 }
+	maxSize, _ := strconv.Atoi(r.FormValue("max_size"))
+	if maxSize < 1 { maxSize = 1280 }
+	batch := r.FormValue("batch") == "1"
+
+	filename := header.Filename
+	if filename == "" { filename = "video.mp4" }
+	job := newJob(filename)
+
+	go func() {
+		// Save uploaded file (keep temp dir — output is served from here)
+		tmpDir, _ := os.MkdirTemp("", "sbs_quick_")
+		inPath := filepath.Join(tmpDir, filename)
+		f, _ := os.Create(inPath)
+		io.Copy(f, file)
+		f.Close()
+
+		if batch {
+			// For batch: just queue this one; caller manages batch orchestration
+			runSingle(job, inPath, shift, compress, maxSize)
+		} else {
+			runSingle(job, inPath, shift, compress, maxSize)
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(job)
+}
+
+// ── Core processing ────────────────────────────────────────
+
+func runSingle(job *Job, inPath string, shift int, compress float64, maxSize int) {
 	start := time.Now()
-	updateJob(job.ID, "running", 0, "", "")
+	updateJob(job.ID, "running", 0, "准备中...", "")
 
 	if ffmpeg_ == "" {
-		updateJob(job.ID, "error", 0, "ffmpeg not found. Install: brew install ffmpeg / winget install ffmpeg", "")
+		updateJob(job.ID, "error", 0, "ffmpeg 未安装。请在 PowerShell 运行: winget install ffmpeg", "")
 		return
 	}
 
-	// Check input exists
-	if !fileExists(inPath) {
-		updateJob(job.ID, "error", 0, "File not found: "+inPath, "")
-		return
+	// Build ffmpeg filter for: scale → compress → shift → hstack → encode
+	var filters []string
+
+	// Scale if needed
+	probeW, probeH := probeVideo(inPath)
+	if probeW > maxSize || probeH > maxSize {
+		scale := float64(maxSize) / float64(max(probeW, probeH))
+		filters = append(filters, fmt.Sprintf("scale=trunc(iw*%f/2)*2:trunc(ih*%f/2)*2", scale, scale))
 	}
 
-	outDir := filepath.Dir(inPath)
+	// Split
+	filters = append(filters, "split[l][r]")
+
+	// Left eye: compress horizontally, then shift right
+	filters = append(filters, buildCompressShift("l", "lc", compress, shift))
+	// Right eye: compress horizontally, then shift left
+	filters = append(filters, buildCompressShift("r", "rc", compress, -shift))
+
+	// hstack
+	filters = append(filters, "[lc][rc]hstack[out]")
+
+	filterSpec := strings.Join(filters, ";")
+
+	tmpDir := filepath.Dir(inPath)
 	base := strings.TrimSuffix(filepath.Base(inPath), filepath.Ext(inPath))
-	outPath := filepath.Join(outDir, base+"_SBS.mp4")
+	outPath := filepath.Join(tmpDir, base+"_quick_sbs.mp4")
 	for n := 1; fileExists(outPath); n++ {
-		outPath = filepath.Join(outDir, fmt.Sprintf("%s_SBS_%d.mp4", base, n))
+		outPath = filepath.Join(tmpDir, fmt.Sprintf("%s_quick_sbs_%d.mp4", base, n))
 	}
 
-	updateJob(job.ID, "running", 0.05, "", "")
+	updateJob(job.ID, "running", 0.05, "编码中...", "")
 
-	dur := getDuration(inPath)
-	P := shift
-	filter := fmt.Sprintf(
-		"[0:v]split[l][r];"+
-			"[l]crop=iw-%d:ih:0:0,pad=iw:ih:%d:0[lp];"+
-			"[r]crop=iw-%d:ih:%d:0,pad=iw:ih:0:0[rp];"+
-			"[lp][rp]hstack[out]",
-		P, P, P, P)
-
-	args := []string{
+	cmd := exec.Command(ffmpeg_,
 		"-y", "-i", inPath,
-		"-filter_complex", filter,
+		"-filter_complex", filterSpec,
 		"-map", "[out]", "-map", "0:a?",
 		"-c:v", "libx264", "-crf", "18", "-preset", "fast",
 		"-pix_fmt", "yuv420p", "-c:a", "aac",
+		"-movflags", "+faststart",
 		"-progress", "pipe:1", "-nostats",
 		outPath,
-	}
-	log.Printf("[%s] ffmpeg %s", job.ID, strings.Join(args, " "))
+	)
 
-	cmd := exec.Command(ffmpeg_, args...)
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
+	stderrB := new(strings.Builder)
 
 	if err := cmd.Start(); err != nil {
 		updateJob(job.ID, "error", 0, err.Error(), "")
 		return
 	}
-
-	// Drain stderr in background
-	stderrB := new(strings.Builder)
 	go func() { io.Copy(stderrB, stderr) }()
 
-	// Parse progress
+	// Progress parsing
+	dur := probeDuration(inPath)
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -277,7 +299,7 @@ func runSingle(job *Job, inPath string, shift int) {
 						p := secs / dur
 						if p < 0.05 { p = 0.05 }
 						if p > 0.99 { p = 0.99 }
-						updateJob(job.ID, "running", p, "", "")
+						updateJob(job.ID, "running", p, fmt.Sprintf("处理中 %.0f%%", p*100), "")
 					}
 				}
 			}
@@ -296,62 +318,120 @@ func runSingle(job *Job, inPath string, shift int) {
 		log.Printf("[%s] FAIL: %v (%.1fs)", job.ID, err, elapsed)
 		return
 	}
-	updateJob(job.ID, "done", 1.0, "", outPath)
+
+	// Register output for download
+	outID := fmt.Sprintf("%s_%d", job.ID, time.Now().UnixNano())
+	outsMu.Lock()
+	outputs[outID] = outPath
+	outsMu.Unlock()
+
+	updateJob(job.ID, "done", 1.0, fmt.Sprintf("完成 (%.0f秒)", elapsed), outID)
 	log.Printf("[%s] DONE: %s (%.1fs)", job.ID, outPath, elapsed)
 }
 
-func runBatch(dir string, shift int) {
-	if ffmpeg_ == "" {
-		j := newJob("batch"); updateJob(j.ID, "error", 0, "ffmpeg not found", ""); return
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		j := newJob("batch"); updateJob(j.ID, "error", 0, err.Error(), ""); return
-	}
-	exts := map[string]bool{
-		".mp4": true, ".mkv": true, ".mov": true, ".avi": true,
-		".flv": true, ".webm": true, ".m4v": true, ".ts": true,
-		".wmv": true, ".mpg": true, ".mpeg": true,
-	}
-	var videos []string
-	for _, e := range entries {
-		if e.IsDir() { continue }
-		if exts[strings.ToLower(filepath.Ext(e.Name()))] {
-			videos = append(videos, filepath.Join(dir, e.Name()))
+func buildCompressShift(srcLabel, dstLabel string, compress float64, shiftPx int) string {
+	if compress > 0 {
+		// Scale narrower, then pad back to original width (centered)
+		return fmt.Sprintf(
+			"[%s]scale=trunc(iw*(1-%f)/2)*2:ih,pad=iw:ih:(iw-ow)/2:0,"+
+				"crop=iw-%d:ih:%d:0,pad=iw:ih:%d:0[%s]",
+			srcLabel, compress,
+			abs(shiftPx), max(shiftPx, 0), max(shiftPx, 0),
+			dstLabel,
+		)
+	} else {
+		if shiftPx >= 0 {
+			return fmt.Sprintf("[%s]crop=iw-%d:ih:%d:0,pad=iw:ih:%d:0[%s]",
+				srcLabel, shiftPx, shiftPx, shiftPx, dstLabel)
+		} else {
+			s := -shiftPx
+			return fmt.Sprintf("[%s]crop=iw-%d:ih:0:0,pad=iw:ih:%d:0[%s]",
+				srcLabel, s, s, dstLabel)
 		}
-	}
-	log.Printf("Batch: %d videos in %s", len(videos), dir)
-	for _, v := range videos {
-		job := newJob(filepath.Base(v))
-		runSingle(job, v, shift)
 	}
 }
 
-func getDuration(path string) float64 {
-	if ffmpeg_ == "" { return 60 }
-	ffprobe := strings.Replace(ffmpeg_, "ffmpeg", "ffprobe", 1)
-	out, err := exec.Command(ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path).Output()
-	if err != nil { return 60 }
-	d, _ := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	return d
+// ── Helpers ────────────────────────────────────────────────
+
+func newJob(filename string) *Job {
+	jobsMu.Lock(); defer jobsMu.Unlock()
+	jobSeq++
+	j := &Job{ID: strconv.Itoa(jobSeq), Filename: filename, Status: "queued"}
+	jobs[j.ID] = j
+	return j
+}
+
+func updateJob(id, status string, progress float64, msg, outID string) {
+	jobsMu.Lock(); defer jobsMu.Unlock()
+	if j, ok := jobs[id]; ok {
+		j.Status = status; j.Progress = progress; j.Msg = msg; j.OutID = outID
+	}
+}
+
+func probeVideo(path string) (int, int) {
+	cmd := exec.Command(ffmpeg_, "-i", path, "-f", "null", "-")
+	// ffmpeg prints stream info to stderr
+	out, _ := cmd.CombinedOutput()
+	w, h := 1920, 1080
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.Contains(line, "Stream") && strings.Contains(line, "Video") {
+			// Parse "1280x720" or similar
+			idx := strings.Index(line, ",")
+			if idx < 0 { continue }
+			dims := strings.Split(strings.TrimSpace(line[:idx]), " ")
+			last := dims[len(dims)-1]
+			parts := strings.Split(last, "x")
+			if len(parts) == 2 {
+				w, _ = strconv.Atoi(strings.TrimSpace(parts[0]))
+				h, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
+			}
+			break
+		}
+		// Alternate: "Video: h264 ... 1280x720"
+		for _, word := range strings.Fields(line) {
+			if strings.Count(word, "x") == 1 {
+				parts := strings.Split(word, "x")
+				ww, err1 := strconv.Atoi(parts[0])
+				hh, err2 := strconv.Atoi(parts[1])
+				if err1 == nil && err2 == nil && ww > 0 && hh > 0 {
+					w, h = ww, hh
+					break
+				}
+			}
+		}
+	}
+	return w, h
+}
+
+func probeDuration(path string) float64 {
+	cmd := exec.Command(ffmpeg_, "-i", path, "-f", "null", "-")
+	out, _ := cmd.CombinedOutput()
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.Contains(line, "Duration") {
+			fields := strings.Fields(line)
+			for _, f := range fields {
+				if strings.Count(f, ":") == 2 {
+					return parseTime(f)
+				}
+			}
+		}
+	}
+	return 60
 }
 
 func parseTime(ts string) float64 {
+	ts = strings.TrimSuffix(ts, ",")
 	var h, m int; var s float64
 	fmt.Sscanf(ts, "%d:%d:%f", &h, &m, &s)
 	return float64(h*3600+m*60) + s
 }
 
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
-}
+func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
 
 func depth(p string) int {
-	// relative to home dir
 	home, _ := os.UserHomeDir()
-	rel := strings.TrimPrefix(p, home)
-	return len(strings.Split(rel, string(os.PathSeparator)))
+	return len(strings.Split(strings.TrimPrefix(p, home), string(os.PathSeparator)))
 }
 
 func lastLines(s string, n int) string {
@@ -359,3 +439,5 @@ func lastLines(s string, n int) string {
 	if len(lines) <= n { return s }
 	return strings.Join(lines[len(lines)-n:], "\n")
 }
+
+func abs(x int) int { if x < 0 { return -x }; return x }
